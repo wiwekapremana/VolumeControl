@@ -3,12 +3,17 @@
 Cara pakai:
   1. Jalankan:  python main.py           (tanpa jendela video)
                 python main.py --debug   (tampilkan video + landmark untuk uji coba)
-  2. Angkat KEDUA tangan di atas bahu selama ~1 detik  -> mode AKTIF.
-  3. Turunkan satu tangan, lalu:
-       - cubit ibu jari & telunjuk          -> atur volume
-       - kepalkan tangan ~0.4 detik         -> mute / unmute
-       - telapak terbuka, geser kiri/kanan  -> lagu sebelumnya / berikutnya
-       - telapak terbuka, diam ~0.7 detik   -> play / pause
+  2. Angkat KEDUA tangan di atas bahu selama ~1 detik  -> AKTIF.
+  3. Turunkan satu tangan, lalu (tanpa ganti mode):
+       👌 ujung ibu jari + telunjuk menempel, geser naik/turun -> volume
+       ✊ kepalan ~0.4 detik                                    -> mute / unmute
+       🖐 telapak terbuka, geser kiri/kanan                    -> lagu sebelumnya / berikutnya
+       🖐 telapak terbuka, diam ~0.7 detik                     -> play / pause
+       👆 bentuk pistol (telunjuk lurus, ibu jari tegak)        -> gerakkan pointer
+            ibu jari turun lalu naik                           -> klik
+            ibu jari turun, tahan sambil gerak                 -> drag
+            ibu jari turun, tahan diam ~0.8 detik              -> klik kanan
+       ✌ dua jari, geser naik/turun dari titik awal           -> scroll
   4. Angkat kedua tangan lagi ~1 detik, atau tinggalkan kamera ~3 detik -> TERKUNCI.
 
 Keluar: Ctrl+C di terminal (atau tombol 'q' di jendela debug).
@@ -19,6 +24,7 @@ from __future__ import annotations
 import argparse
 import queue
 import signal
+import sys
 import threading
 import time
 import tkinter as tk
@@ -27,24 +33,21 @@ import cv2
 import mediapipe as mp
 
 from audio import get_volume_backend, send_media_key
-from gesture import (Action, Config, Controller, Frame, State, both_hands_raised,
-                     classify_hand, palm_center, pinch_ratio)
+from gesture import Action, Config, Controller, Frame, State, both_hands_raised, extract
+from mouse import Mouse, enable_dpi_awareness
 from overlay import Overlay
+
+MEDIA = {Action.PLAY_PAUSE, Action.NEXT, Action.PREV}
 
 
 def open_camera(index: int) -> cv2.VideoCapture:
-    backend = cv2.CAP_DSHOW if hasattr(cv2, "CAP_DSHOW") and _is_windows() else cv2.CAP_ANY
+    backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
     cap = cv2.VideoCapture(index, backend)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     if not cap.isOpened():
         raise SystemExit(f"Kamera {index} tidak bisa dibuka.")
     return cap
-
-
-def _is_windows() -> bool:
-    import sys
-    return sys.platform == "win32"
 
 
 def vision_loop(args, frames: "queue.Queue[Frame]", stop: threading.Event) -> None:
@@ -73,15 +76,8 @@ def vision_loop(args, frames: "queue.Queue[Frame]", stop: threading.Event) -> No
                 hand, hand_id = res.left_hand_landmarks.landmark, "left"
             else:
                 hand, hand_id = None, None
-            center = palm_center(hand)
 
-            frame = Frame(timestamp=time.monotonic(),
-                          both_hands_raised=both_hands_raised(pose),
-                          pinch_ratio=pinch_ratio(hand),
-                          hand_pose=classify_hand(hand),
-                          hand_x=center[0] if center else None,
-                          hand_y=center[1] if center else None,
-                          hand_id=hand_id)
+            frame = extract(hand, hand_id, time.monotonic(), both_hands_raised(pose))
             try:
                 frames.put_nowait(frame)
             except queue.Full:
@@ -94,8 +90,8 @@ def vision_loop(args, frames: "queue.Queue[Frame]", stop: threading.Event) -> No
                     if lms:
                         draw.draw_landmarks(img, lms, conn)
                 pose_name = frame.hand_pose.value if frame.hand_pose else "-"
-                ratio = f"{frame.pinch_ratio:.2f}" if frame.pinch_ratio is not None else "-"
-                txt = f"raised={frame.both_hands_raised}  pose={pose_name}  pinch={ratio}"
+                thumb = f"{frame.thumb_press:.2f}" if frame.thumb_press is not None else "-"
+                txt = f"raised={frame.both_hands_raised}  pose={pose_name}  thumb={thumb}"
                 cv2.putText(img, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 255, 0), 2)
                 cv2.imshow("Gesture Volume Control (debug)", img)
@@ -108,7 +104,7 @@ def vision_loop(args, frames: "queue.Queue[Frame]", stop: threading.Event) -> No
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Atur volume dengan gesture tangan.")
+    p = argparse.ArgumentParser(description="Atur volume, media & mouse dengan gesture.")
     p.add_argument("--debug", action="store_true", help="tampilkan jendela video")
     p.add_argument("--camera", type=int, default=0, help="indeks kamera (default 0)")
     p.add_argument("--model", type=int, default=1, choices=(0, 1, 2),
@@ -117,9 +113,12 @@ def main() -> None:
                    help="lama angkat kedua tangan untuk aktif/kunci (detik)")
     p.add_argument("--timeout", type=float, default=3.0,
                    help="kunci otomatis bila tangan hilang selama ini (detik)")
+    p.add_argument("--no-mouse", action="store_true", help="matikan kontrol pointer")
     args = p.parse_args()
 
+    enable_dpi_awareness()
     volume = get_volume_backend()
+    mouse = Mouse()
     ctrl = Controller(Config(hold_time=args.hold, idle_timeout=args.timeout))
     ctrl.sync_volume(volume.get())
     ctrl.muted = volume.is_muted()
@@ -134,9 +133,25 @@ def main() -> None:
     overlay = Overlay(root)
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
-    last = {"state": ctrl.state, "progress": 0.0}
+    last = {"state": ctrl.state, "progress": 0.0, "pose": None}
     sync_at = [0.0]
     print("Siap. Angkat kedua tangan ~1 detik untuk mengaktifkan. Ctrl+C untuk keluar.")
+
+    def handle_action(a: Action) -> None:
+        if a in (Action.MUTE, Action.UNMUTE):
+            volume.set_mute(a is Action.MUTE)
+        elif a in MEDIA:
+            send_media_key(a.value)
+        elif args.no_mouse:
+            return
+        elif a is Action.CLICK:
+            mouse.click()
+        elif a is Action.RIGHT_CLICK:
+            mouse.right_click()
+        elif a is Action.DRAG_START:
+            mouse.left_down()
+        elif a is Action.DRAG_END:
+            mouse.left_up()
 
     def tick() -> None:
         if stop.is_set() or not worker.is_alive():
@@ -152,27 +167,28 @@ def main() -> None:
                 f = frames.get_nowait()
             except queue.Empty:
                 break
-            prev = ctrl.state
-            if prev is State.LOCKED:
-                ctrl.sync_volume(volume.get())  # ikuti perubahan dari keyboard/mixer
+            if ctrl.state is State.LOCKED:
+                ctrl.sync_volume(volume.get())
             out = ctrl.update(f)
             if out.volume_changed:
                 volume.set(out.volume)
-            if out.action in (Action.MUTE, Action.UNMUTE):
-                volume.set_mute(out.action is Action.MUTE)
-            elif out.action is not None:
-                send_media_key(out.action.value)
+            if out.pointer is not None and not args.no_mouse:
+                mouse.move(*out.pointer)   # pindah dulu, baru klik di posisi itu
+            if out.scroll and not args.no_mouse:
+                mouse.scroll(out.scroll)
             if out.action is not None:
+                handle_action(out.action)
                 action = out.action
-                print(f"aksi: {out.action.value}")
+                if out.action not in (Action.CLICK, Action.DRAG_START, Action.DRAG_END):
+                    print(f"aksi: {out.action.value}")
             if out.toggled:
                 print("AKTIF" if out.state is State.ACTIVE else "TERKUNCI")
                 just_locked |= out.state is State.LOCKED
-            last["state"], last["progress"] = out.state, out.activation_progress
+            last.update(state=out.state, progress=out.activation_progress, pose=out.pose)
 
-        overlay.render(last["state"], ctrl.display_volume, last["progress"],
-                       time.monotonic(), just_locked=just_locked,
-                       muted=ctrl.muted, action=action)
+        overlay.render(last["state"], ctrl.display_volume, last["progress"], now,
+                       just_locked=just_locked, muted=ctrl.muted, action=action,
+                       pose=last["pose"])
         root.after(16, tick)  # ~60 fps untuk animasi halus
 
     root.after(16, tick)

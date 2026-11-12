@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 
-from gesture import Action, State
+from gesture import Action, HandPose, State
 
 W, H = 320, 78
 KEY = "#ff00fe"                 # warna "transparan" untuk sudut membulat (Windows)
@@ -33,6 +33,13 @@ ACTION_LABEL = {
     Action.PLAY_PAUSE: ("Play / Pause", C_MEDIA),
     Action.NEXT: ("Lagu berikutnya", C_MEDIA),
     Action.PREV: ("Lagu sebelumnya", C_MEDIA),
+    Action.RIGHT_CLICK: ("Klik kanan", C_MEDIA),
+}
+
+POSE_HINT = {
+    HandPose.POINT: "Pointer · ibu jari turun = klik",
+    HandPose.TWO: "Scroll · geser naik / turun",
+    HandPose.PINCH: "Volume · geser naik / turun",
 }
 
 
@@ -49,10 +56,13 @@ class Overlay:
             root.attributes("-transparentcolor", KEY)
         root.configure(bg=bg)
 
+        # Skala untuk layar DPI tinggi (125%, 150%, ...)
+        self.s = s = max(1.0, root.winfo_fpixels("1i") / 96.0)
+        w, h = round(W * s), round(H * s)
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
-        root.geometry(f"{W}x{H}+{(sw - W) // 2}+{sh - H - 110}")
+        root.geometry(f"{w}x{h}+{(sw - w) // 2}+{sh - h - round(110 * s)}")
 
-        self.c = tk.Canvas(root, width=W, height=H, bg=bg, highlightthickness=0)
+        self.c = tk.Canvas(root, width=w, height=h, bg=bg, highlightthickness=0)
         self.c.pack()
         if is_win:
             root.after(50, self._make_click_through)
@@ -64,13 +74,15 @@ class Overlay:
         self._toast: Action | None = None
         self._toast_at = -1e9
         self._now = 0.0
+        self._pose: HandPose | None = None
 
     # ------------------------------------------------------------------ public
     def render(self, state: State, volume: float, progress: float, now: float,
                just_locked: bool = False, muted: bool = False,
-               action: Action | None = None) -> None:
+               action: Action | None = None, pose: HandPose | None = None) -> None:
         self._now = now
-        if action is not None:
+        self._pose = pose
+        if action in ACTION_LABEL:
             self._toast, self._toast_at = action, now
         if just_locked:
             self._lock_flash_until = now + LOCK_FLASH
@@ -113,7 +125,7 @@ class Overlay:
         elif muted:
             accent, label = C_MUTED, "Mute · kepalkan tangan"
         elif state is State.ACTIVE:
-            accent, label = C_ACTIVE, "Volume control aktif"
+            accent, label = C_ACTIVE, POSE_HINT.get(self._pose, "Gesture control aktif")
         else:
             accent, label = C_LOCKED, "Terkunci"
 
@@ -147,6 +159,8 @@ class Overlay:
         if fx - x0 > 8:
             _round_rect(c, x0, by - 4, fx, by + 4, 4, fill=bar, outline="")
         c.create_oval(fx - 7, by - 7, fx + 7, by + 7, fill=TEXT, outline="")
+        if self.s != 1.0:
+            c.scale("all", 0, 0, self.s, self.s)
 
     def _media_icon(self, cx: int, cy: int, color: str, action: Action) -> None:
         c = self.c
