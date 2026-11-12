@@ -75,6 +75,8 @@ class Overlay:
         self._toast_at = -1e9
         self._now = 0.0
         self._pose: HandPose | None = None
+        self._last_key = None
+        self.busy = False   # True saat indikator tampil / beranimasi
 
     # ------------------------------------------------------------------ public
     def render(self, state: State, volume: float, progress: float, now: float,
@@ -96,6 +98,7 @@ class Overlay:
             self._alpha = target
         self._shown_vol += (volume - self._shown_vol) * 0.3
 
+        self.busy = want_visible or self._alpha > 0.0
         if self._alpha <= 0.0:
             if self._visible:
                 self.root.withdraw()
@@ -105,6 +108,14 @@ class Overlay:
             self.root.deiconify()
             self.root.attributes("-topmost", True)
             self._visible = True
+        # Gambar ulang hanya bila ada yang berubah
+        toast = self._toast if now - self._toast_at < TOAST_TIME else None
+        key = (state, round(progress, 2), muted, self._pose, toast,
+               round(self._shown_vol, 3), round(self._alpha, 2),
+               toast is not None and now - self._toast_at < 0.25 and round(now - self._toast_at, 2))
+        if key == self._last_key:
+            return
+        self._last_key = key
         self.root.attributes("-alpha", self._alpha)
         self._draw(state, progress, muted)
 

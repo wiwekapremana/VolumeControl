@@ -22,6 +22,7 @@ Keluar: Ctrl+C di terminal (atau tombol 'q' di jendela debug).
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import signal
 import sys
@@ -50,16 +51,32 @@ def open_camera(index: int) -> cv2.VideoCapture:
     return cap
 
 
-def vision_loop(args, frames: "queue.Queue[Frame]", stop: threading.Event) -> None:
-    """Thread kamera: baca frame, deteksi pose + tangan, kirim fitur ke main thread."""
-    cap = open_camera(args.camera)
-    mp_holistic = mp.solutions.holistic
-    draw = mp.solutions.drawing_utils
+LOCKED_FPS = 6        # saat terkunci: cukup cek "kedua tangan diangkat"
+POSE_EVERY = 4        # saat aktif: pose (badan) cukup dicek tiap 4 frame
 
-    with mp_holistic.Holistic(model_complexity=args.model, smooth_landmarks=True,
-                              min_detection_confidence=0.6,
-                              min_tracking_confidence=0.6) as holistic:
+
+def vision_loop(args, frames: "queue.Queue[Frame]", stop: threading.Event,
+                active: threading.Event) -> None:
+    """Thread kamera: baca frame, deteksi pose + tangan, kirim fitur ke main thread.
+
+    Hemat CPU:
+      - TERKUNCI: hanya model pose versi ringan, ~6 frame/detik.
+      - AKTIF: model tangan versi ringan tiap frame, pose tiap beberapa frame.
+      - Tidak memakai model wajah sama sekali (Holistic dulu ikut menghitung wajah).
+    """
+    cap = open_camera(args.camera)
+    mp_pose, mp_hands = mp.solutions.pose, mp.solutions.hands
+    draw = mp.solutions.drawing_utils
+    raised, n = False, 0
+    pose_lms = None
+
+    with mp_pose.Pose(model_complexity=args.model, smooth_landmarks=True,
+                      min_detection_confidence=0.6, min_tracking_confidence=0.6) as pose, \
+         mp_hands.Hands(max_num_hands=1, model_complexity=0,
+                        min_detection_confidence=0.6, min_tracking_confidence=0.6) as hands:
         while not stop.is_set():
+            is_active = active.is_set()
+            t_start = time.monotonic()
             ok, img = cap.read()
             if not ok:
                 time.sleep(0.05)
@@ -67,56 +84,91 @@ def vision_loop(args, frames: "queue.Queue[Frame]", stop: threading.Event) -> No
             img = cv2.flip(img, 1)
             rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             rgb.flags.writeable = False
-            res = holistic.process(rgb)
 
-            pose = res.pose_landmarks.landmark if res.pose_landmarks else None
-            if res.right_hand_landmarks:
-                hand, hand_id = res.right_hand_landmarks.landmark, "right"
-            elif res.left_hand_landmarks:
-                hand, hand_id = res.left_hand_landmarks.landmark, "left"
-            else:
-                hand, hand_id = None, None
+            n += 1
+            if not is_active or n % POSE_EVERY == 0:
+                res_pose = pose.process(rgb)
+                pose_lms = res_pose.pose_landmarks
+                raised = both_hands_raised(pose_lms.landmark if pose_lms else None)
 
-            frame = extract(hand, hand_id, time.monotonic(), both_hands_raised(pose))
+            hand_lms, hand_id = None, None
+            if is_active:
+                res_hands = hands.process(rgb)
+                if res_hands.multi_hand_landmarks:
+                    hand_lms = res_hands.multi_hand_landmarks[0]
+                    label = res_hands.multi_handedness[0].classification[0].label
+                    hand_id = label.lower()
+
+            frame = extract(hand_lms.landmark if hand_lms else None, hand_id,
+                            time.monotonic(), raised)
             try:
                 frames.put_nowait(frame)
             except queue.Full:
                 pass
 
             if args.debug:
-                for lms, conn in ((res.pose_landmarks, mp_holistic.POSE_CONNECTIONS),
-                                  (res.left_hand_landmarks, mp_holistic.HAND_CONNECTIONS),
-                                  (res.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS)):
-                    if lms:
-                        draw.draw_landmarks(img, lms, conn)
+                if pose_lms:
+                    draw.draw_landmarks(img, pose_lms, mp_pose.POSE_CONNECTIONS)
+                if hand_lms:
+                    draw.draw_landmarks(img, hand_lms, mp_hands.HAND_CONNECTIONS)
                 pose_name = frame.hand_pose.value if frame.hand_pose else "-"
                 thumb = f"{frame.thumb_press:.2f}" if frame.thumb_press is not None else "-"
-                txt = f"raised={frame.both_hands_raised}  pose={pose_name}  thumb={thumb}"
+                txt = f"raised={raised}  pose={pose_name}  thumb={thumb}"
                 cv2.putText(img, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 255, 0), 2)
                 cv2.imshow("Gesture Volume Control (debug)", img)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     stop.set()
 
+            if is_active and args.fps < 30:
+                wait = 1.0 / args.fps - (time.monotonic() - t_start)
+                if wait > 0:
+                    time.sleep(wait)
+                    cap.grab()
+            if not is_active:
+                # Tidur sisa waktu; buang frame lama di buffer kamera agar tidak telat
+                wait = 1.0 / LOCKED_FPS - (time.monotonic() - t_start)
+                if wait > 0:
+                    active.wait(wait)  # langsung bangun saat AKTIF
+                cap.grab()
+
     cap.release()
     if args.debug:
         cv2.destroyAllWindows()
+
+
+def lower_priority() -> None:
+    """Prioritas proses di bawah normal: aplikasi lain selalu didahulukan."""
+    cv2.setNumThreads(1)
+    if sys.platform == "win32":
+        import ctypes
+        BELOW_NORMAL_PRIORITY_CLASS = 0x4000
+        k32 = ctypes.windll.kernel32
+        k32.SetPriorityClass(k32.GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS)
+    else:
+        try:
+            os.nice(5)
+        except OSError:
+            pass
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Atur volume, media & mouse dengan gesture.")
     p.add_argument("--debug", action="store_true", help="tampilkan jendela video")
     p.add_argument("--camera", type=int, default=0, help="indeks kamera (default 0)")
-    p.add_argument("--model", type=int, default=1, choices=(0, 1, 2),
-                   help="kompleksitas model pose: 0 cepat, 2 akurat (default 1)")
+    p.add_argument("--model", type=int, default=0, choices=(0, 1, 2),
+                   help="kompleksitas model pose: 0 ringan (default), 2 akurat")
     p.add_argument("--hold", type=float, default=1.0,
                    help="lama angkat kedua tangan untuk aktif/kunci (detik)")
     p.add_argument("--timeout", type=float, default=3.0,
                    help="kunci otomatis bila tangan hilang selama ini (detik)")
+    p.add_argument("--fps", type=int, default=30,
+                   help="batas frame/detik saat aktif (mis. 20 untuk laptop lemah)")
     p.add_argument("--no-mouse", action="store_true", help="matikan kontrol pointer")
     args = p.parse_args()
 
     enable_dpi_awareness()
+    lower_priority()
     volume = get_volume_backend()
     mouse = Mouse()
     ctrl = Controller(Config(hold_time=args.hold, idle_timeout=args.timeout))
@@ -125,7 +177,9 @@ def main() -> None:
 
     frames: "queue.Queue[Frame]" = queue.Queue(maxsize=8)
     stop = threading.Event()
-    worker = threading.Thread(target=vision_loop, args=(args, frames, stop), daemon=True)
+    active = threading.Event()   # memberi tahu thread kamera kapan perlu kerja penuh
+    worker = threading.Thread(target=vision_loop, args=(args, frames, stop, active),
+                              daemon=True)
     worker.start()
 
     root = tk.Tk()
@@ -185,11 +239,16 @@ def main() -> None:
                 print("AKTIF" if out.state is State.ACTIVE else "TERKUNCI")
                 just_locked |= out.state is State.LOCKED
             last.update(state=out.state, progress=out.activation_progress, pose=out.pose)
+            if out.state is State.ACTIVE:
+                active.set()
+            else:
+                active.clear()
 
         overlay.render(last["state"], ctrl.display_volume, last["progress"], now,
                        just_locked=just_locked, muted=ctrl.muted, action=action,
                        pose=last["pose"])
-        root.after(16, tick)  # ~60 fps untuk animasi halus
+        # ~60 fps saat indikator tampil; jarang-jarang saat tersembunyi (hemat CPU)
+        root.after(16 if overlay.busy else 100, tick)
 
     root.after(16, tick)
     root.mainloop()

@@ -48,11 +48,20 @@ python main.py --debug        # tampilkan video + landmark (untuk uji coba)
 python main.py --camera 1     # pakai kamera lain
 python main.py --hold 0.7     # lama tahan aktivasi (detik)
 python main.py --timeout 5    # kunci otomatis setelah tangan hilang (detik)
-python main.py --model 0      # model lebih ringan bila PC lambat
+python main.py --fps 20       # lebih hemat CPU saat aktif (pointer sedikit kurang halus)
+python main.py --model 1      # deteksi badan lebih akurat (lebih berat)
 python main.py --no-mouse     # matikan kontrol pointer/klik/scroll
 ```
 
 Keluar: `Ctrl+C` di terminal, atau tombol `q` di jendela `--debug`.
+
+## Ringan
+
+- Saat **terkunci** (sebagian besar waktu): hanya model badan versi ringan,
+  ~6 frame/detik, sekitar 3% CPU di laptop 4 core.
+- Saat **aktif**: model tangan versi ringan; badan hanya dicek tiap 4 frame.
+- Tidak memakai model wajah; prioritas proses "di bawah normal", jadi aplikasi
+  lain selalu didahulukan; indikator hanya digambar ulang bila ada perubahan.
 
 ## Struktur
 
