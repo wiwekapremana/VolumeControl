@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 
-from gesture import State
+from gesture import Action, State
 
 W, H = 320, 78
 KEY = "#ff00fe"                 # warna "transparan" untuk sudut membulat (Windows)
@@ -20,9 +20,20 @@ MUTED = "#8b919c"
 C_ACTIVE = "#34d399"
 C_ARMING = "#fbbf24"
 C_LOCKED = "#9ca3af"
+C_MUTED = "#f87171"
+C_MEDIA = "#60a5fa"
 
 MAX_ALPHA = 0.93
 LOCK_FLASH = 1.4                # lama pesan "Terkunci" tampil (detik)
+TOAST_TIME = 1.3                # lama notifikasi aksi tampil (detik)
+
+ACTION_LABEL = {
+    Action.MUTE: ("Mute", C_MUTED),
+    Action.UNMUTE: ("Suara aktif kembali", C_ACTIVE),
+    Action.PLAY_PAUSE: ("Play / Pause", C_MEDIA),
+    Action.NEXT: ("Lagu berikutnya", C_MEDIA),
+    Action.PREV: ("Lagu sebelumnya", C_MEDIA),
+}
 
 
 class Overlay:
@@ -50,10 +61,17 @@ class Overlay:
         self._shown_vol = 0.0
         self._lock_flash_until = 0.0
         self._visible = True
+        self._toast: Action | None = None
+        self._toast_at = -1e9
+        self._now = 0.0
 
     # ------------------------------------------------------------------ public
     def render(self, state: State, volume: float, progress: float, now: float,
-               just_locked: bool = False) -> None:
+               just_locked: bool = False, muted: bool = False,
+               action: Action | None = None) -> None:
+        self._now = now
+        if action is not None:
+            self._toast, self._toast_at = action, now
         if just_locked:
             self._lock_flash_until = now + LOCK_FLASH
 
@@ -76,17 +94,24 @@ class Overlay:
             self.root.attributes("-topmost", True)
             self._visible = True
         self.root.attributes("-alpha", self._alpha)
-        self._draw(state, progress)
+        self._draw(state, progress, muted)
 
     # ----------------------------------------------------------------- drawing
-    def _draw(self, state: State, progress: float) -> None:
+    def _draw(self, state: State, progress: float, muted: bool) -> None:
         c = self.c
         c.delete("all")
         _round_rect(c, 2, 2, W - 2, H - 2, 22, fill=BG, outline="#262a33")
 
-        if progress > 0:
+        toast_age = self._now - self._toast_at
+        toast = self._toast if toast_age < TOAST_TIME else None
+
+        if toast is not None and progress == 0:
+            label, accent = ACTION_LABEL[toast]
+        elif progress > 0:
             accent, label = C_ARMING, ("Tahan untuk kunci…" if state is State.ACTIVE
                                        else "Tahan untuk aktifkan…")
+        elif muted:
+            accent, label = C_MUTED, "Mute · kepalkan tangan"
         elif state is State.ACTIVE:
             accent, label = C_ACTIVE, "Volume control aktif"
         else:
@@ -94,13 +119,18 @@ class Overlay:
 
         # Ikon speaker + cincin progres aktivasi
         cx, cy, r = 40, H // 2, 20
+        if toast is not None and toast_age < 0.25:  # efek "pop" saat aksi
+            r += round(5 * (1 - toast_age / 0.25))
         c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=TRACK, width=3)
         if progress > 0:
             c.create_arc(cx - r, cy - r, cx + r, cy + r, start=90,
                          extent=-359.9 * progress, style="arc", outline=accent, width=3)
-        elif state is State.ACTIVE:
+        elif state is State.ACTIVE or toast is not None:
             c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=accent, width=3)
-        self._speaker(cx, cy, accent, muted=self._shown_vol < 0.01)
+        if toast in (Action.PLAY_PAUSE, Action.NEXT, Action.PREV) and progress == 0:
+            self._media_icon(cx, cy, accent, toast)
+        else:
+            self._speaker(cx, cy, accent, muted=muted or self._shown_vol < 0.01)
 
         # Label + persentase
         x0, x1 = 76, W - 24
@@ -113,9 +143,25 @@ class Overlay:
         by = 50
         _round_rect(c, x0, by - 4, x1, by + 4, 4, fill=TRACK, outline="")
         fx = x0 + (x1 - x0) * self._shown_vol
+        bar = C_LOCKED if muted else accent
         if fx - x0 > 8:
-            _round_rect(c, x0, by - 4, fx, by + 4, 4, fill=accent, outline="")
+            _round_rect(c, x0, by - 4, fx, by + 4, 4, fill=bar, outline="")
         c.create_oval(fx - 7, by - 7, fx + 7, by + 7, fill=TEXT, outline="")
+
+    def _media_icon(self, cx: int, cy: int, color: str, action: Action) -> None:
+        c = self.c
+        if action is Action.PLAY_PAUSE:
+            c.create_polygon(cx - 9, cy - 8, cx - 9, cy + 8, cx + 1, cy, fill=color)
+            c.create_rectangle(cx + 3, cy - 8, cx + 6, cy + 8, fill=color, outline="")
+            c.create_rectangle(cx + 8, cy - 8, cx + 11, cy + 8, fill=color, outline="")
+            return
+        s = 1 if action is Action.NEXT else -1
+        for off in (-8, 0):
+            x = cx + s * off
+            c.create_polygon(x, cy - 7, x, cy + 7, x + s * 8, cy, fill=color)
+        bx = cx + s * 9
+        c.create_rectangle(min(bx, bx + s * 3), cy - 7, max(bx, bx + s * 3), cy + 7,
+                           fill=color, outline="")
 
     def _speaker(self, cx: int, cy: int, color: str, muted: bool) -> None:
         c = self.c

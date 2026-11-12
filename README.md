@@ -9,10 +9,18 @@ Sebagai gantinya ada indikator volume kecil yang melayang di bagian bawah layar.
 |---|---|
 | Angkat **kedua tangan** di atas bahu, tahan ~1 detik | Mode **AKTIF** (cincin kuning terisi, lalu hijau) |
 | Turunkan satu tangan, rapatkan/renggangkan **ibu jari & telunjuk** | Volume turun/naik dengan halus |
+| **Kepalkan** tangan ~0.4 detik | Mute / unmute |
+| **Telapak terbuka**, geser cepat ke kanan / kiri | Lagu berikutnya / sebelumnya |
+| **Telapak terbuka**, diam ~0.7 detik | Play / Pause |
 | Angkat kedua tangan lagi ~1 detik | **TERKUNCI** |
 | Tangan tidak terlihat ~3 detik | Otomatis **TERKUNCI** |
 
-Saat terkunci, gerakan tangan apa pun tidak mengubah volume.
+Saat terkunci, gerakan tangan apa pun tidak berpengaruh. Kontrol media memakai
+tombol media Windows, jadi bekerja di Spotify, YouTube (browser), VLC, dan lainnya.
+Selama mute, cubitan tidak mengubah volume; kepalkan tangan lagi untuk unmute.
+
+Tips: jalankan `python main.py --debug` untuk melihat pose yang terbaca
+(`open` / `fist` / `other`) bila gesture terasa kurang peka.
 
 ## Instalasi (Windows, Python 3.9 – 3.12)
 
@@ -40,5 +48,5 @@ Keluar: `Ctrl+C` di terminal, atau tombol `q` di jendela `--debug`.
 - `main.py`: kamera + MediaPipe Holistic (pose + tangan) di thread terpisah, indikator di thread utama
 - `gesture.py`: logika aktivasi, kunci, dan penghalusan volume (bisa diuji tanpa kamera)
 - `overlay.py`: indikator volume (always-on-top, klik tembus)
-- `audio.py`: kontrol volume Windows via pycaw
+- `audio.py`: volume & mute Windows via pycaw, tombol media via WinAPI
 - `tests/`: unit test logika gesture (`pip install pytest && pytest`)

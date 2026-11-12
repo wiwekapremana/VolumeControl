@@ -4,7 +4,11 @@ Cara pakai:
   1. Jalankan:  python main.py           (tanpa jendela video)
                 python main.py --debug   (tampilkan video + landmark untuk uji coba)
   2. Angkat KEDUA tangan di atas bahu selama ~1 detik  -> mode AKTIF.
-  3. Turunkan satu tangan, atur volume dengan cubitan ibu jari & telunjuk.
+  3. Turunkan satu tangan, lalu:
+       - cubit ibu jari & telunjuk          -> atur volume
+       - kepalkan tangan ~0.4 detik         -> mute / unmute
+       - telapak terbuka, geser kiri/kanan  -> lagu sebelumnya / berikutnya
+       - telapak terbuka, diam ~0.7 detik   -> play / pause
   4. Angkat kedua tangan lagi ~1 detik, atau tinggalkan kamera ~3 detik -> TERKUNCI.
 
 Keluar: Ctrl+C di terminal (atau tombol 'q' di jendela debug).
@@ -22,8 +26,9 @@ import tkinter as tk
 import cv2
 import mediapipe as mp
 
-from audio import get_volume_backend
-from gesture import Config, Controller, Frame, State, both_hands_raised, pinch_ratio
+from audio import get_volume_backend, send_media_key
+from gesture import (Action, Config, Controller, Frame, State, both_hands_raised,
+                     classify_hand, palm_center, pinch_ratio)
 from overlay import Overlay
 
 
@@ -62,12 +67,21 @@ def vision_loop(args, frames: "queue.Queue[Frame]", stop: threading.Event) -> No
             res = holistic.process(rgb)
 
             pose = res.pose_landmarks.landmark if res.pose_landmarks else None
-            hand_lms = res.right_hand_landmarks or res.left_hand_landmarks
-            hand = hand_lms.landmark if hand_lms else None
+            if res.right_hand_landmarks:
+                hand, hand_id = res.right_hand_landmarks.landmark, "right"
+            elif res.left_hand_landmarks:
+                hand, hand_id = res.left_hand_landmarks.landmark, "left"
+            else:
+                hand, hand_id = None, None
+            center = palm_center(hand)
 
             frame = Frame(timestamp=time.monotonic(),
                           both_hands_raised=both_hands_raised(pose),
-                          pinch_ratio=pinch_ratio(hand))
+                          pinch_ratio=pinch_ratio(hand),
+                          hand_pose=classify_hand(hand),
+                          hand_x=center[0] if center else None,
+                          hand_y=center[1] if center else None,
+                          hand_id=hand_id)
             try:
                 frames.put_nowait(frame)
             except queue.Full:
@@ -79,7 +93,9 @@ def vision_loop(args, frames: "queue.Queue[Frame]", stop: threading.Event) -> No
                                   (res.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS)):
                     if lms:
                         draw.draw_landmarks(img, lms, conn)
-                txt = f"raised={frame.both_hands_raised}  pinch={frame.pinch_ratio}"
+                pose_name = frame.hand_pose.value if frame.hand_pose else "-"
+                ratio = f"{frame.pinch_ratio:.2f}" if frame.pinch_ratio is not None else "-"
+                txt = f"raised={frame.both_hands_raised}  pose={pose_name}  pinch={ratio}"
                 cv2.putText(img, txt, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                             (0, 255, 0), 2)
                 cv2.imshow("Gesture Volume Control (debug)", img)
@@ -106,6 +122,7 @@ def main() -> None:
     volume = get_volume_backend()
     ctrl = Controller(Config(hold_time=args.hold, idle_timeout=args.timeout))
     ctrl.sync_volume(volume.get())
+    ctrl.muted = volume.is_muted()
 
     frames: "queue.Queue[Frame]" = queue.Queue(maxsize=8)
     stop = threading.Event()
@@ -118,13 +135,18 @@ def main() -> None:
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
     last = {"state": ctrl.state, "progress": 0.0}
+    sync_at = [0.0]
     print("Siap. Angkat kedua tangan ~1 detik untuk mengaktifkan. Ctrl+C untuk keluar.")
 
     def tick() -> None:
         if stop.is_set() or not worker.is_alive():
             root.destroy()
             return
-        just_locked = False
+        just_locked, action = False, None
+        now = time.monotonic()
+        if now - sync_at[0] > 0.25:  # ikuti perubahan dari keyboard/mixer Windows
+            sync_at[0] = now
+            ctrl.muted = volume.is_muted()
         while True:
             try:
                 f = frames.get_nowait()
@@ -136,13 +158,21 @@ def main() -> None:
             out = ctrl.update(f)
             if out.volume_changed:
                 volume.set(out.volume)
+            if out.action in (Action.MUTE, Action.UNMUTE):
+                volume.set_mute(out.action is Action.MUTE)
+            elif out.action is not None:
+                send_media_key(out.action.value)
+            if out.action is not None:
+                action = out.action
+                print(f"aksi: {out.action.value}")
             if out.toggled:
                 print("AKTIF" if out.state is State.ACTIVE else "TERKUNCI")
                 just_locked |= out.state is State.LOCKED
             last["state"], last["progress"] = out.state, out.activation_progress
 
         overlay.render(last["state"], ctrl.display_volume, last["progress"],
-                       time.monotonic(), just_locked=just_locked)
+                       time.monotonic(), just_locked=just_locked,
+                       muted=ctrl.muted, action=action)
         root.after(16, tick)  # ~60 fps untuk animasi halus
 
     root.after(16, tick)
