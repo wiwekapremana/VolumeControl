@@ -1,0 +1,151 @@
+"""Indikator volume kecil yang melayang di layar (pengganti jendela video).
+
+- Muncul saat aktivasi / mode AKTIF, lalu memudar sendiri saat terkunci.
+- Selalu di atas (always-on-top), tidak bisa diklik (klik tembus), tanpa bingkai.
+"""
+
+from __future__ import annotations
+
+import sys
+import tkinter as tk
+
+from gesture import State
+
+W, H = 320, 78
+KEY = "#ff00fe"                 # warna "transparan" untuk sudut membulat (Windows)
+BG = "#16181d"
+TRACK = "#2b2f38"
+TEXT = "#e8eaed"
+MUTED = "#8b919c"
+C_ACTIVE = "#34d399"
+C_ARMING = "#fbbf24"
+C_LOCKED = "#9ca3af"
+
+MAX_ALPHA = 0.93
+LOCK_FLASH = 1.4                # lama pesan "Terkunci" tampil (detik)
+
+
+class Overlay:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+        root.attributes("-alpha", 0.0)
+
+        is_win = sys.platform == "win32"
+        bg = KEY if is_win else BG
+        if is_win:
+            root.attributes("-transparentcolor", KEY)
+        root.configure(bg=bg)
+
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        root.geometry(f"{W}x{H}+{(sw - W) // 2}+{sh - H - 110}")
+
+        self.c = tk.Canvas(root, width=W, height=H, bg=bg, highlightthickness=0)
+        self.c.pack()
+        if is_win:
+            root.after(50, self._make_click_through)
+
+        self._alpha = 0.0
+        self._shown_vol = 0.0
+        self._lock_flash_until = 0.0
+        self._visible = True
+
+    # ------------------------------------------------------------------ public
+    def render(self, state: State, volume: float, progress: float, now: float,
+               just_locked: bool = False) -> None:
+        if just_locked:
+            self._lock_flash_until = now + LOCK_FLASH
+
+        want_visible = (
+            state is State.ACTIVE or progress > 0 or now < self._lock_flash_until
+        )
+        target = MAX_ALPHA if want_visible else 0.0
+        self._alpha += (target - self._alpha) * 0.18
+        if abs(target - self._alpha) < 0.01:
+            self._alpha = target
+        self._shown_vol += (volume - self._shown_vol) * 0.3
+
+        if self._alpha <= 0.0:
+            if self._visible:
+                self.root.withdraw()
+                self._visible = False
+            return
+        if not self._visible:
+            self.root.deiconify()
+            self.root.attributes("-topmost", True)
+            self._visible = True
+        self.root.attributes("-alpha", self._alpha)
+        self._draw(state, progress)
+
+    # ----------------------------------------------------------------- drawing
+    def _draw(self, state: State, progress: float) -> None:
+        c = self.c
+        c.delete("all")
+        _round_rect(c, 2, 2, W - 2, H - 2, 22, fill=BG, outline="#262a33")
+
+        if progress > 0:
+            accent, label = C_ARMING, ("Tahan untuk kunci…" if state is State.ACTIVE
+                                       else "Tahan untuk aktifkan…")
+        elif state is State.ACTIVE:
+            accent, label = C_ACTIVE, "Volume control aktif"
+        else:
+            accent, label = C_LOCKED, "Terkunci"
+
+        # Ikon speaker + cincin progres aktivasi
+        cx, cy, r = 40, H // 2, 20
+        c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=TRACK, width=3)
+        if progress > 0:
+            c.create_arc(cx - r, cy - r, cx + r, cy + r, start=90,
+                         extent=-359.9 * progress, style="arc", outline=accent, width=3)
+        elif state is State.ACTIVE:
+            c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=accent, width=3)
+        self._speaker(cx, cy, accent, muted=self._shown_vol < 0.01)
+
+        # Label + persentase
+        x0, x1 = 76, W - 24
+        c.create_text(x0, 24, text=label, anchor="w", fill=MUTED,
+                      font=("Segoe UI", 9))
+        c.create_text(x1, 24, text=f"{round(self._shown_vol * 100)}%", anchor="e",
+                      fill=TEXT, font=("Segoe UI Semibold", 12))
+
+        # Bar volume
+        by = 50
+        _round_rect(c, x0, by - 4, x1, by + 4, 4, fill=TRACK, outline="")
+        fx = x0 + (x1 - x0) * self._shown_vol
+        if fx - x0 > 8:
+            _round_rect(c, x0, by - 4, fx, by + 4, 4, fill=accent, outline="")
+        c.create_oval(fx - 7, by - 7, fx + 7, by + 7, fill=TEXT, outline="")
+
+    def _speaker(self, cx: int, cy: int, color: str, muted: bool) -> None:
+        c = self.c
+        c.create_polygon(cx - 9, cy - 4, cx - 4, cy - 4, cx + 2, cy - 9,
+                         cx + 2, cy + 9, cx - 4, cy + 4, cx - 9, cy + 4, fill=color)
+        if muted:
+            c.create_line(cx + 5, cy - 4, cx + 11, cy + 4, fill=color, width=2)
+            c.create_line(cx + 5, cy + 4, cx + 11, cy - 4, fill=color, width=2)
+            return
+        waves = 1 + (self._shown_vol > 0.33) + (self._shown_vol > 0.66)
+        for i in range(waves):
+            rr = 5 + i * 4
+            c.create_arc(cx + 2 - rr, cy - rr, cx + 2 + rr, cy + rr, start=-45,
+                         extent=90, style="arc", outline=color, width=2)
+
+    def _make_click_through(self) -> None:
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT = -20, 0x80000, 0x20
+            WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE = 0x80, 0x08000000
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            style |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        except Exception as exc:  # tidak fatal
+            print(f"[info] Overlay tidak bisa dibuat klik-tembus: {exc}")
+
+
+def _round_rect(c: tk.Canvas, x0, y0, x1, y1, r, **kw):
+    r = min(r, (x1 - x0) / 2, (y1 - y0) / 2)
+    pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
+           x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+    return c.create_polygon(pts, smooth=True, **kw)
