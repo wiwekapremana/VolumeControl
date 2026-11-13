@@ -1,0 +1,6 @@
+opencv-python>=4.8
+# 0.10.14 masih menyediakan API mp.solutions (Holistic); Python 3.9 - 3.12
+mediapipe==0.10.14
+numpy<2
+pycaw>=20230407; sys_platform == "win32"
+comtypes>=1.2; sys_platform == "win32"
